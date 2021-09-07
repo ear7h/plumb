@@ -33,7 +33,6 @@ pub async fn test() -> Result<bool, f32> {
 ```
 
 **TODO:**
-* add tests that all combinators can be `Send`
 * documentation
 * `map_err`
 * `or_*` methods

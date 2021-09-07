@@ -10,7 +10,7 @@ mod cons;
 use cons::*;
 use func::*;
 
-pub type PinBoxFut<T> = Pin<Box<dyn Future<Output = T>>>;
+pub type PinBoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 macro_rules! assert_trait {
     ($tr:path, $val:expr) => {
@@ -82,7 +82,7 @@ pub trait PipeExt : Pipe {
     where
         Self : Sized,
         Self::Output : TypeCons<T> + 'static,
-        T : Clone + 'static,
+        T : Send + Clone + 'static,
     {
         assert_trait!{
             Pipe<
@@ -103,7 +103,7 @@ pub trait PipeExt : Pipe {
         Self : Sized + 'static,
         Self::Output : ResultT,
         result_ok!(Self::Output) : TypeCons<T>,
-        T : Clone + 'static,
+        T : Clone + Send + Sync + 'static,
     {
         assert_trait!{
             Pipe<
@@ -169,7 +169,7 @@ pub trait PipeExt : Pipe {
                     <Self::Output as ResultT>::Ok,
                     Result<OOk, result_err!(Self::Output)>
                 >
-            > + Clone + 'static,
+            > + Send + Sync + Clone + 'static,
         (
             Func<
                 F,
@@ -194,11 +194,13 @@ pub trait PipeExt : Pipe {
     fn amap<F, Fut, O>(self, f : F) -> AMap<Self, F, Fut>
     where
         Self : Sized,
-        Self::Output : ResultT + 'static,
+        Self::Output : ResultT + Send + 'static,
+        result_ok!(Self::Output) : Send,
+        result_err!(Self::Output) : Send,
         F : Into<
             Func<F, <Self::Output as ResultT>::Ok, Fut>,
-        > + Clone + 'static,
-        Fut : Future<Output = O>,
+        > + Clone + Send + 'static,
+        Fut : Future<Output = O> + Send,
         (
             Func<F, <Self::Output as ResultT>::Ok, Fut>,
             <Self::Output as ResultT>::Ok,
@@ -222,7 +224,7 @@ pub trait PipeExt : Pipe {
         Self::Output : ResultT + 'static,
         F : Into<
                 Func<F, <Self::Output as ResultT>::Ok, O>
-            > + Clone + 'static,
+            > + Send + Sync + Clone + 'static,
         (
             Func<F, <Self::Output as ResultT>::Ok, O>,
             <Self::Output as ResultT>::Ok,
@@ -241,13 +243,14 @@ pub trait PipeExt : Pipe {
     /// `aseq` then `tuple`
     fn aseqt<F, Fut, O>(self, f : F) -> Tuple<ASeq<Self, F, Fut>>
     where
-        Self : Sized,
-        Self::Output : 'static,
+        Self : Sized + Send + Sync,
+        Self::Output : Send + 'static,
+        Self::Input : Send,
         O : 'static,
-        Fut : Future<Output = O>,
+        Fut : Future<Output = O> + Send,
         F : Into<
                 Func<F, Self::Output, Fut>
-            > + Clone + 'static,
+            > + Send + Sync + Clone + 'static,
         (
             Func<F, Self::Output, Fut>,
             Self::Output
@@ -264,12 +267,13 @@ pub trait PipeExt : Pipe {
     /// Sequence the current computation with an asynchronous one
     fn aseq<F, Fut, O>(self, f : F) -> ASeq<Self, F, Fut>
     where
-        Self : Sized,
-        Self::Output : 'static,
+        Self : Sized + Send + Sync,
+        Self::Output : Send + 'static,
+        Self::Input : Send,
         F : Into<
                 Func<F, Self::Output, Fut>
-            > + Clone + 'static,
-        Fut : Future<Output = O>,
+            > + Send + Sync + Clone + 'static,
+        Fut : Future<Output = O> + Send,
         (
             Func<F, Self::Output, Fut>,
             Self::Output
@@ -288,7 +292,7 @@ pub trait PipeExt : Pipe {
         Self : Sized,
         Self::Output : 'static,
         O : 'static,
-        F : Into<Func<F, Self::Output, O>> + Clone + 'static,
+        F : Into<Func<F, Self::Output, O>> + Send + Sync + Clone + 'static,
         (Func<F, Self::Output, O>, Self::Output) : TupleApply<Output = O>,
     {
         assert_trait!{
@@ -304,7 +308,7 @@ pub trait PipeExt : Pipe {
     where
         Self : Sized,
         Self::Output : 'static,
-        F : Into<Func<F, Self::Output, O>> + Clone + 'static,
+        F : Into<Func<F, Self::Output, O>> + Send + Sync + Clone + 'static,
         (Func<F, Self::Output, O>, Self::Output) : TupleApply<Output = O>,
     {
         assert_trait!{
@@ -328,7 +332,7 @@ where
     S : Pipe + 'static,
     S::Output : ResultT,
     result_ok!(S::Output) : TypeCons<T>,
-    T : Clone + 'static,
+    T : Send + Sync + Clone + 'static,
 {
     type Input = S::Input;
     type Output = Result<
@@ -400,11 +404,13 @@ pub struct AMap<S, F, Fut> {
 impl<S, F, Fut> Pipe for AMap<S, F, Fut>
 where
     S : Pipe,
-    S::Output : ResultT + 'static,
+    S::Output : ResultT + Send + 'static,
+    result_ok!(S::Output) : Send,
+    result_err!(S::Output) : Send,
     F : Into<
         Func<F, <S::Output as ResultT>::Ok, Fut>
-    > + Clone + 'static,
-    Fut : Future,
+    > + Clone + Send + 'static,
+    Fut : Future + Send,
     (
         Func<F, <S::Output as ResultT>::Ok, Fut>,
         <S::Output as ResultT>::Ok,
@@ -444,7 +450,7 @@ where
                 result_ok!(S::Output),
                 Result<OOk, result_err!(S::Output)>
             >
-        > + Clone + 'static,
+        > + Send + Sync + Clone + 'static,
     (
         Func<
             F,
@@ -481,7 +487,7 @@ where
     S::Output : ResultT + 'static,
     F : Into<
             Func<F, <S::Output as ResultT>::Ok, O>
-        > + Clone + 'static,
+        > + Send + Sync + Clone + 'static,
     (
         Func<F, <S::Output as ResultT>::Ok, O>,
         <S::Output as ResultT>::Ok,
@@ -512,7 +518,7 @@ impl<S, F, O> Pipe for Seq<S, F, O>
 where
     S : Pipe,
     S::Output : 'static,
-    F : Into<Func<F, S::Output, O>> + Clone + 'static,
+    F : Into<Func<F, S::Output, O>> + Send + Sync + Clone + 'static,
     (Func<F, S::Output, O>, S::Output) : TupleApply<Output = O>,
 {
     type Input = S::Input;
@@ -537,7 +543,7 @@ impl<S, T> Pipe for Bind<S, T>
 where
     S : Pipe,
     S::Output : TypeCons<T> + 'static,
-    T : Clone + 'static,
+    T : Send + Clone + 'static,
 {
     type Input = S::Input;
     type Output = type_cons!(S::Output, T);
@@ -564,7 +570,7 @@ pub struct Id<T>{
 
 impl<T> Pipe for Id<T>
 where
-    T : 'static
+    T : Send + 'static
 {
     type Input = T;
     type Output = (T,);
@@ -585,11 +591,11 @@ pub struct ASeq<S, F, Fut>{
 
 impl<S, F, Fut> Pipe for ASeq<S, F, Fut>
 where
-    S : Pipe,
-    S::Output : 'static,
-    S::Input : ,
-    F : Into<Func<F, S::Output, Fut>> + Clone + 'static,
-    Fut : Future,
+    S : Pipe + Sync + Send,
+    S::Output : Send + 'static,
+    S::Input : Send,
+    F : Into<Func<F, S::Output, Fut>> + Send + Sync + Clone + 'static,
+    Fut : Future + Send,
     (Func<F, S::Output, Fut>, S::Output) : TupleApply<Output = Fut>,
 {
 
