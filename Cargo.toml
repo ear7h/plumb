@@ -6,9 +6,9 @@ license-file = "LICENSE"
 description = "A functional, async pipeline framework"
 repository = "https://github.com/ear7h/plumb"
 readme = "README.md"
+documentation = "https://docs.rs/plumb/"
 keywords = ["async"]
 categories = ["asynchronous", "rust-patterns"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+tuple_utils = { git = "https://github.com/ear7h/tuple_utils" }

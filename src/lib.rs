@@ -3,12 +3,7 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::sync::Arc;
 
-mod tuple_macro;
-mod func;
-mod cons;
-
-use cons::*;
-use func::*;
+use tuple_utils::{Pluck, Prepend, Append, Call, RefCall};
 
 pub type PinBoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -81,13 +76,13 @@ pub trait PipeExt : Pipe {
     fn bind<T>(self, t : T) -> Bind<Self, T>
     where
         Self : Sized,
-        Self::Output : TypeCons<T> + 'static,
+        Self::Output : Append<T> + 'static,
         T : Send + Clone + 'static,
     {
         assert_trait!{
             Pipe<
                 Input = Self::Input,
-                Output = type_cons!(Self::Output, T),
+                Output = <Self::Output as Append<T>>::Output,
             >,
             Bind{ s : self, t }
         }
@@ -96,21 +91,20 @@ pub trait PipeExt : Pipe {
     /// A combination of `map` and `bind`; adds a clone of `t` to the
     /// result if it is `Ok`.
     ///
-    /// Note: In order to clone `t` lazyly, an `Arc` is used internally
+    /// Note: In order to clone `t` lazily, an `Arc` is used internally
     /// which gets cloned eagerly.
     fn map_bind<T>(self, t : T) -> MapBind<Self, T>
     where
         Self : Sized + 'static,
         Self::Output : ResultT,
-        result_ok!(Self::Output) : TypeCons<T>,
+        result_ok!(Self::Output) : Append<T>,
         T : Clone + Send + Sync + 'static,
     {
         assert_trait!{
             Pipe<
                 Input = Self::Input,
                 Output = Result<
-                    // can't call type cons with another macro :(
-                    <result_ok!(Self::Output) as TypeCons<T>>::Cons,
+                    <result_ok!(Self::Output) as Append<T>>::Output,
                     result_err!(Self::Output),
                 >,
             >,
@@ -153,6 +147,27 @@ pub trait PipeExt : Pipe {
         }
     }
 
+    /// Like `Result::and_then`, sequence an asynchronous computation that only
+    /// runs when the current commputation returns an `Ok`
+    fn aand_then<F, Fut, O>(self, f : F) -> AAndThen<Self, F, Fut>
+    where
+        Self : Sized,
+        Self::Output : ResultT + 'static,
+        result_err!(Self::Output) : Send,
+        F : Call<result_ok!(Self::Output), Fut> + Clone + Send + 'static,
+        Fut : Future + Send,
+        Fut::Output : ResultT<Ok = O, Err = result_err!(Self::Output)>,
+    {
+        assert_trait!{
+            Pipe<
+                Input = Self::Input,
+                Output = Result<O, result_err!(Self::Output)>,
+            >,
+            AAndThen{s : self, f, _marker : Default::default() }
+        }
+
+    }
+
     /// Like `Result::and_then`, sequence a synchronous computation that only
     /// runs when the current commputation returns an `Ok`
     fn and_then<F, OOk>(self, f : F) -> AndThen<
@@ -163,21 +178,10 @@ pub trait PipeExt : Pipe {
     where
         Self : Sized,
         Self::Output : ResultT + 'static,
-        F : Into<
-                Func<
-                    F,
-                    <Self::Output as ResultT>::Ok,
-                    Result<OOk, result_err!(Self::Output)>
-                >
-            > + Send + Sync + Clone + 'static,
-        (
-            Func<
-                F,
-                result_ok!(Self::Output),
-                Result<OOk, result_err!(Self::Output)>,
-            >,
+        F : Call<
             result_ok!(Self::Output),
-        ) : TupleApply<Output = Result<OOk, result_err!(Self::Output)>>
+            Result<OOk, result_err!(Self::Output)>
+        > + Send + Sync + Clone + 'static,
     {
         assert_trait!{
             Pipe<
@@ -197,14 +201,11 @@ pub trait PipeExt : Pipe {
         Self::Output : ResultT + Send + 'static,
         result_ok!(Self::Output) : Send,
         result_err!(Self::Output) : Send,
-        F : Into<
-            Func<F, <Self::Output as ResultT>::Ok, Fut>,
+        F : Call<
+            result_ok!(Self::Output),
+            Fut,
         > + Clone + Send + 'static,
         Fut : Future<Output = O> + Send,
-        (
-            Func<F, <Self::Output as ResultT>::Ok, Fut>,
-            <Self::Output as ResultT>::Ok,
-        ) : TupleApply<Output = Fut>
     {
         assert_trait!{
             Pipe<
@@ -222,13 +223,10 @@ pub trait PipeExt : Pipe {
     where
         Self : Sized,
         Self::Output : ResultT + 'static,
-        F : Into<
-                Func<F, <Self::Output as ResultT>::Ok, O>
-            > + Send + Sync + Clone + 'static,
-        (
-            Func<F, <Self::Output as ResultT>::Ok, O>,
-            <Self::Output as ResultT>::Ok,
-        ) : TupleApply<Output = O>,
+        F : Call<
+            result_ok!(Self::Output),
+            O
+        > + Send + Sync + Clone + 'static,
     {
         assert_trait!{
             Pipe<
@@ -243,21 +241,17 @@ pub trait PipeExt : Pipe {
     /// `aseq` then `tuple`
     fn aseqt<F, Fut, O>(self, f : F) -> Tuple<ASeq<Self, F, Fut>>
     where
-        Self : Sized + Send + Sync,
+        Self : Sized,
         Self::Output : Send + 'static,
-        Self::Input : Send,
         O : 'static,
         Fut : Future<Output = O> + Send,
-        F : Into<
-                Func<F, Self::Output, Fut>
-            > + Send + Sync + Clone + 'static,
-        (
-            Func<F, Self::Output, Fut>,
-            Self::Output
-        ) : TupleApply<Output = Fut>,
+        F : Call<Self::Output, Fut> + Send + Clone + 'static,
     {
         assert_trait!{
-            Pipe<Input = Self::Input, Output = (O,)>,
+            Pipe<
+                Input = Self::Input,
+                Output = (O,)
+            >,
             Tuple{
                 s : ASeq{s : self, f, _marker : Default::default()}
             }
@@ -267,21 +261,57 @@ pub trait PipeExt : Pipe {
     /// Sequence the current computation with an asynchronous one
     fn aseq<F, Fut, O>(self, f : F) -> ASeq<Self, F, Fut>
     where
-        Self : Sized + Send + Sync,
+        Self : Sized,
         Self::Output : Send + 'static,
-        Self::Input : Send,
-        F : Into<
-                Func<F, Self::Output, Fut>
-            > + Send + Sync + Clone + 'static,
+        F : Call<Self::Output, Fut> + Send + Clone + 'static,
         Fut : Future<Output = O> + Send,
-        (
-            Func<F, Self::Output, Fut>,
-            Self::Output
-        ) : TupleApply<Output = Fut>,
     {
         assert_trait!{
             Pipe<Input = Self::Input, Output = O>,
             ASeq{s : self, f, _marker : Default::default()}
+        }
+    }
+
+    fn seq_bind<F, O>(self, f : F) -> SeqBind<Self, F, O>
+    where
+        Self : Sized,
+        Self::Output : Append<O> + 'static,
+        F : for<'a>
+            RefCall<Self::Output, O> + Send + Sync + Clone + 'static,
+    {
+        assert_trait!{
+            Pipe<
+                Input = Self::Input,
+                Output = <Self::Output as Append<O>>::Output
+            >,
+            SeqBind{
+                s : self,
+                f,
+                _marker : Default::default()
+            }
+        }
+    }
+
+    fn head_seq_bind<F, O>(self, f : F) -> HeadSeqBind<Self, F, O>
+    where
+        Self : Sized,
+        Self::Output : Pluck + Append<O> + 'static,
+        F : for<'a>
+            RefCall<
+                (<Self::Output as Pluck>::Head,),
+                O
+            > + Send + Sync + Clone + 'static,
+    {
+        assert_trait!{
+            Pipe<
+                Input = Self::Input,
+                Output = <Self::Output as Append<O>>::Output
+            >,
+            HeadSeqBind{
+                s : self,
+                f,
+                _marker : Default::default()
+            }
         }
     }
 
@@ -292,8 +322,7 @@ pub trait PipeExt : Pipe {
         Self : Sized,
         Self::Output : 'static,
         O : 'static,
-        F : Into<Func<F, Self::Output, O>> + Send + Sync + Clone + 'static,
-        (Func<F, Self::Output, O>, Self::Output) : TupleApply<Output = O>,
+        F : Call<Self::Output, O> + Send + Clone + 'static,
     {
         assert_trait!{
             Pipe<Input = Self::Input, Output = (O,)>,
@@ -308,8 +337,7 @@ pub trait PipeExt : Pipe {
     where
         Self : Sized,
         Self::Output : 'static,
-        F : Into<Func<F, Self::Output, O>> + Send + Sync + Clone + 'static,
-        (Func<F, Self::Output, O>, Self::Output) : TupleApply<Output = O>,
+        F : Call<Self::Output, O> + Send + Clone + 'static,
     {
         assert_trait!{
             Pipe<Input = Self::Input, Output = O>,
@@ -331,12 +359,12 @@ impl<S, T> Pipe for MapBind<S, T>
 where
     S : Pipe + 'static,
     S::Output : ResultT,
-    result_ok!(S::Output) : TypeCons<T>,
+    result_ok!(S::Output) : Append<T>,
     T : Send + Sync + Clone + 'static,
 {
     type Input = S::Input;
     type Output = Result<
-        <result_ok!(S::Output) as TypeCons<T>>::Cons,
+        <result_ok!(S::Output) as Append<T>>::Output,
         <S::Output as ResultT>::Err,
     >;
 
@@ -345,7 +373,7 @@ where
         let arc = Arc::clone(&self.t);
 
         Box::pin(async move {
-            fut.await.into_result().map(|x| x.cons((*arc).clone()))
+            fut.await.into_result().map(|x| x.append((*arc).clone()))
         })
     }
 }
@@ -395,6 +423,43 @@ where
     }
 }
 
+pub struct AAndThen<S, F, Fut> {
+    s : S,
+    f : F,
+    _marker : PhantomData<fn () -> Fut>,
+}
+
+impl<S, F, Fut> Pipe for AAndThen<S, F, Fut>
+where
+    S : Pipe,
+    S::Output : ResultT + 'static,
+    result_err!(S::Output) : Send,
+    F : Call<result_ok!(S::Output), Fut> + Clone + Send + 'static,
+    Fut : Future + Send,
+    Fut::Output : ResultT<Err = result_err!(S::Output)>,
+{
+    type Input = S::Input;
+    type Output = Result<result_ok!(Fut::Output), result_err!(S::Output)>;
+
+    fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
+        let fut = self.s.run(i);
+        let next = self.f.clone();
+
+        Box::pin(async move {
+
+            let res : Result<_, _> = fut.await.into_result()
+            .map(|v| {
+                Call::call(next, v)
+            });
+
+            match res {
+                Ok(fut) => fut.await.into_result(),
+                Err(err) => Err(err),
+            }
+        })
+    }
+}
+
 pub struct AMap<S, F, Fut> {
     s : S,
     f : F,
@@ -407,14 +472,11 @@ where
     S::Output : ResultT + Send + 'static,
     result_ok!(S::Output) : Send,
     result_err!(S::Output) : Send,
-    F : Into<
-        Func<F, <S::Output as ResultT>::Ok, Fut>
+    F : Call<
+        result_ok!(S::Output),
+        Fut
     > + Clone + Send + 'static,
     Fut : Future + Send,
-    (
-        Func<F, <S::Output as ResultT>::Ok, Fut>,
-        <S::Output as ResultT>::Ok,
-    ) : TupleApply<Output = Fut>,
 {
     type Input = S::Input;
     type Output = Result<Fut::Output, <S::Output as ResultT>::Err>;
@@ -426,7 +488,7 @@ where
         Box::pin(async move {
 
             match fut.await.into_result() {
-                Ok(v) => Ok(func::apply_tuple(next, v).await),
+                Ok(v) => Ok(Call::call(next, v).await),
                 Err(e) => Err(e),
             }
 
@@ -444,21 +506,10 @@ impl<S, F, OOk> Pipe for AndThen<S, F, Result<OOk, result_err!(S::Output)>>
 where
     S : Pipe,
     S::Output : ResultT + 'static,
-    F : Into<
-            Func<
-                F,
-                result_ok!(S::Output),
-                Result<OOk, result_err!(S::Output)>
-            >
-        > + Send + Sync + Clone + 'static,
-    (
-        Func<
-            F,
-            result_ok!(S::Output),
-            Result<OOk, result_err!(S::Output)>
-        >,
-        <S::Output as ResultT>::Ok,
-    ) : TupleApply<Output = Result<OOk, result_err!(S::Output)>>
+    F : Call<
+        result_ok!(S::Output),
+        Result<OOk, result_err!(S::Output)>
+    > + Send + Sync + Clone + 'static,
 {
     type Input = S::Input;
     type Output = Result<OOk, result_err!(S::Output)>;
@@ -469,7 +520,7 @@ where
 
         Box::pin(async move {
             fut.await.into_result().and_then(|v| {
-                func::apply_tuple(f, v)
+                Call::call(f, v)
             })
         })
     }
@@ -485,16 +536,13 @@ impl<S, F, O> Pipe for Map<S, F, O>
 where
     S : Pipe,
     S::Output : ResultT + 'static,
-    F : Into<
-            Func<F, <S::Output as ResultT>::Ok, O>
-        > + Send + Sync + Clone + 'static,
-    (
-        Func<F, <S::Output as ResultT>::Ok, O>,
-        <S::Output as ResultT>::Ok,
-    ) : TupleApply<Output = O>,
+    F : Call<
+        result_ok!(S::Output),
+        O
+    > + Send + Sync + Clone + 'static,
 {
     type Input = S::Input;
-    type Output = Result<O, <S::Output as ResultT>::Err>;
+    type Output = Result<O, result_err!(S::Output)>;
 
     fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
         let fut = self.s.run(i);
@@ -502,8 +550,67 @@ where
 
         Box::pin(async move {
             fut.await.into_result().map(|v| {
-                func::apply_tuple(f, v)
+                Call::call(f, v)
             })
+        })
+    }
+}
+
+pub struct SeqBind<S, F, O> {
+    s : S,
+    f : F,
+    _marker : PhantomData<fn () -> O>,
+}
+
+impl<S, F, O> Pipe for SeqBind<S, F, O>
+where
+    S : Pipe,
+    S::Output : Append<O> + 'static,
+    F : for<'a>
+        RefCall<S::Output, O> + Send + Sync + Clone + 'static,
+{
+    type Input = S::Input;
+    type Output = <S::Output as Append<O>>::Output;
+
+    fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
+        let fut = self.s.run(i);
+        let f = self.f.clone();
+        Box::pin(async move {
+            let args = fut.await;
+            let o = RefCall::ref_call(f, &args);
+            args.append(o)
+        })
+    }
+}
+
+pub struct HeadSeqBind<S, F, O> {
+    s : S,
+    f : F,
+    _marker : PhantomData<fn () -> O>,
+}
+
+impl<S, F, O> Pipe for HeadSeqBind<S, F, O>
+where
+    S : Pipe,
+    S::Output : Pluck + Append<O> + 'static,
+    F : for<'a>
+        RefCall<
+            (<S::Output as Pluck>::Head,),
+            O
+        > + Send + Sync + Clone + 'static,
+{
+    type Input = S::Input;
+    type Output = <S::Output as Append<O>>::Output;
+
+    fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
+        let fut = self.s.run(i);
+        let f = self.f.clone();
+
+        Box::pin(async move {
+            let (head, tail) = fut.await.pluck();
+            let tup = (head,);
+            let o = RefCall::ref_call(f, &tup);
+            tail.prepend(tup.0).append(o)
         })
     }
 }
@@ -518,8 +625,7 @@ impl<S, F, O> Pipe for Seq<S, F, O>
 where
     S : Pipe,
     S::Output : 'static,
-    F : Into<Func<F, S::Output, O>> + Send + Sync + Clone + 'static,
-    (Func<F, S::Output, O>, S::Output) : TupleApply<Output = O>,
+    F : Call<S::Output, O> + Send + Clone + 'static,
 {
     type Input = S::Input;
     type Output = O;
@@ -528,7 +634,7 @@ where
         let fut = self.s.run(i);
         let f = self.f.clone();
         Box::pin(async move {
-            func::apply_tuple(f, fut.await)
+            Call::call(f, fut.await)
         })
     }
 }
@@ -542,23 +648,23 @@ pub struct Bind<S, T> {
 impl<S, T> Pipe for Bind<S, T>
 where
     S : Pipe,
-    S::Output : TypeCons<T> + 'static,
+    S::Output : Append<T> + 'static,
     T : Send + Clone + 'static,
 {
     type Input = S::Input;
-    type Output = type_cons!(S::Output, T);
+    type Output = <S::Output as Append<T>>::Output;
 
     fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
         let fut = self.s.run(i);
         let t = self.t.clone();
         Box::pin(async move {
-            fut.await.cons(t)
+            fut.await.append(t)
         })
     }
 }
 
 
-fn id<T>() -> Id<T> {
+pub fn id<T>() -> Id<T> {
     Id{
         _marker : Default::default(),
     }
@@ -573,11 +679,11 @@ where
     T : Send + 'static
 {
     type Input = T;
-    type Output = (T,);
+    type Output = T;
 
     fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
         Box::pin(async move {
-            (i,)
+            i
         })
     }
 }
@@ -591,12 +697,10 @@ pub struct ASeq<S, F, Fut>{
 
 impl<S, F, Fut> Pipe for ASeq<S, F, Fut>
 where
-    S : Pipe + Sync + Send,
+    S : Pipe,
     S::Output : Send + 'static,
-    S::Input : Send,
-    F : Into<Func<F, S::Output, Fut>> + Send + Sync + Clone + 'static,
+    F : Call<S::Output, Fut> + Send + Clone + 'static,
     Fut : Future + Send,
-    (Func<F, S::Output, Fut>, S::Output) : TupleApply<Output = Fut>,
 {
 
     type Input = S::Input;
@@ -608,7 +712,7 @@ where
 
         Box::pin(async move {
             let j = fut.await;
-            func::apply_tuple(next, j).await
+            Call::call(next, j).await
         })
     }
 }
@@ -619,11 +723,18 @@ pub async fn test() -> Result<bool, f32> {
     }
 
     id::<i32>()
+    .tuple()
     .bind(20 as i32)
     .bind("hello")
     .aseq(always_true)
     .tuple()
-    .seq(|b : bool| {
+    .seq_bind(|_t : &bool| {
+        1.1
+    })
+    .head_seq_bind(|_t : &bool| {
+        "hello"
+    })
+    .seq(|b : bool, _f : f32, _s : &str| {
         Ok((!b,))
     })
     .map(|b:bool| {
@@ -637,6 +748,9 @@ pub async fn test() -> Result<bool, f32> {
     .map_tuple()
     .and_then(|_| {
         Err(1.1)
+    })
+    .aand_then(|_ : f32| async {
+        Err(1.2)
     })
     .run(12).await
 }

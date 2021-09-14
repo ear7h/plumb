@@ -5,3 +5,11 @@ version = 3
 [[package]]
 name = "plumb"
 version = "0.1.0"
+dependencies = [
+ "tuple_utils",
+]
+
+[[package]]
+name = "tuple_utils"
+version = "0.4.0"
+source = "git+https://github.com/ear7h/tuple_utils#918dc391de38b50096e4194c9befbc55255f822c"
