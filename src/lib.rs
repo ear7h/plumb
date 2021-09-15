@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::sync::Arc;
 
-use tuple_utils::{Pluck, Prepend, Append, Call, RefCall};
+use tuple_utils::{Append, Call};
 
 pub type PinBoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -272,49 +272,6 @@ pub trait PipeExt : Pipe {
         }
     }
 
-    fn seq_bind<F, O>(self, f : F) -> SeqBind<Self, F, O>
-    where
-        Self : Sized,
-        Self::Output : Append<O> + 'static,
-        F : for<'a>
-            RefCall<Self::Output, O> + Send + Sync + Clone + 'static,
-    {
-        assert_trait!{
-            Pipe<
-                Input = Self::Input,
-                Output = <Self::Output as Append<O>>::Output
-            >,
-            SeqBind{
-                s : self,
-                f,
-                _marker : Default::default()
-            }
-        }
-    }
-
-    fn head_seq_bind<F, O>(self, f : F) -> HeadSeqBind<Self, F, O>
-    where
-        Self : Sized,
-        Self::Output : Pluck + Append<O> + 'static,
-        F : for<'a>
-            RefCall<
-                (<Self::Output as Pluck>::Head,),
-                O
-            > + Send + Sync + Clone + 'static,
-    {
-        assert_trait!{
-            Pipe<
-                Input = Self::Input,
-                Output = <Self::Output as Append<O>>::Output
-            >,
-            HeadSeqBind{
-                s : self,
-                f,
-                _marker : Default::default()
-            }
-        }
-    }
-
     /// A convenience function equivalent to calling
     /// `seq` then `tuple`
     fn seqt<F, O>(self, f : F) -> Tuple<Seq<Self, F, O>>
@@ -350,6 +307,7 @@ pub trait PipeExt : Pipe {
 /// so the inner T can be reachable in an async move block (as opposed to
 /// reference captured in a normal async block, which makes them ?Send).
 /// Then, S is run and the inner T is cloned iff the result is ok.
+#[derive(Clone)]
 pub struct MapBind<S, T> {
     s : S,
     t : Arc<T>,
@@ -378,6 +336,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct MapTuple<S> {
     s : S,
 }
@@ -402,6 +361,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct Tuple<S> {
     s : S,
 }
@@ -423,6 +383,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct AAndThen<S, F, Fut> {
     s : S,
     f : F,
@@ -460,6 +421,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct AMap<S, F, Fut> {
     s : S,
     f : F,
@@ -496,6 +458,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct AndThen<S, F, O> {
     s : S,
     f : F,
@@ -526,6 +489,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct Map<S, F, O> {
     s : S,
     f : F,
@@ -556,65 +520,8 @@ where
     }
 }
 
-pub struct SeqBind<S, F, O> {
-    s : S,
-    f : F,
-    _marker : PhantomData<fn () -> O>,
-}
 
-impl<S, F, O> Pipe for SeqBind<S, F, O>
-where
-    S : Pipe,
-    S::Output : Append<O> + 'static,
-    F : for<'a>
-        RefCall<S::Output, O> + Send + Sync + Clone + 'static,
-{
-    type Input = S::Input;
-    type Output = <S::Output as Append<O>>::Output;
-
-    fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
-        let fut = self.s.run(i);
-        let f = self.f.clone();
-        Box::pin(async move {
-            let args = fut.await;
-            let o = RefCall::ref_call(f, &args);
-            args.append(o)
-        })
-    }
-}
-
-pub struct HeadSeqBind<S, F, O> {
-    s : S,
-    f : F,
-    _marker : PhantomData<fn () -> O>,
-}
-
-impl<S, F, O> Pipe for HeadSeqBind<S, F, O>
-where
-    S : Pipe,
-    S::Output : Pluck + Append<O> + 'static,
-    F : for<'a>
-        RefCall<
-            (<S::Output as Pluck>::Head,),
-            O
-        > + Send + Sync + Clone + 'static,
-{
-    type Input = S::Input;
-    type Output = <S::Output as Append<O>>::Output;
-
-    fn run(&self, i : Self::Input) -> PinBoxFut<Self::Output> {
-        let fut = self.s.run(i);
-        let f = self.f.clone();
-
-        Box::pin(async move {
-            let (head, tail) = fut.await.pluck();
-            let tup = (head,);
-            let o = RefCall::ref_call(f, &tup);
-            tail.prepend(tup.0).append(o)
-        })
-    }
-}
-
+#[derive(Copy,Clone)]
 pub struct Seq<S, F, O> {
     s : S,
     f : F,
@@ -640,6 +547,7 @@ where
 }
 
 
+#[derive(Copy,Clone)]
 pub struct Bind<S, T> {
     s : S,
     t : T,
@@ -670,6 +578,7 @@ pub fn id<T>() -> Id<T> {
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct Id<T>{
     _marker : PhantomData<T>,
 }
@@ -688,6 +597,7 @@ where
     }
 }
 
+#[derive(Copy,Clone)]
 pub struct ASeq<S, F, Fut>{
     s : S,
     f : F,
@@ -728,11 +638,11 @@ pub async fn test() -> Result<bool, f32> {
     .bind("hello")
     .aseq(always_true)
     .tuple()
-    .seq_bind(|_t : &bool| {
-        1.1
+    .tuple().seq(|t : (_,)| {
+        t.append(1.1)
     })
-    .head_seq_bind(|_t : &bool| {
-        "hello"
+    .tuple().seq(|t : (_,_)| {
+        t.append("hello")
     })
     .seq(|b : bool, _f : f32, _s : &str| {
         Ok((!b,))
