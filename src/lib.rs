@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod tuple_utils;
 use tuple_utils::{Append, Call};
 
 pub type PinBoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;

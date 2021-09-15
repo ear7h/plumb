@@ -11,4 +11,4 @@ keywords = ["async"]
 categories = ["asynchronous", "rust-patterns"]
 
 [dependencies]
-tuple_utils = { version = "0.5.0", git = "https://github.com/ear7h/tuple_utils" }
+# tuple_utils = "0.4.0"
